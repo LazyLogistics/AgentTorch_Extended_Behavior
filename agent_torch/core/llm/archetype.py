@@ -37,22 +37,29 @@ class Archetype:
             base_user_prompt = str(prompt)
 
         # Initialize LLM archetypes (n_arch copies)
-        try:
-            self._llm.initialize_llm()
-        except Exception:
-            pass
+        # Initialize if llm exposes initialize_llm; otherwise assume ready
+        init = getattr(self._llm, "initialize_llm", None)
+        if callable(init):
+            init()
         self._llm_archetypes: List[LLMArchetype] = [
             LLMArchetype(self._llm, base_user_prompt, n_arch=self.n_arch)
             for _ in range(self.n_arch)
         ]
 
     # --- Public API ---
-    def broadcast(self, population) -> None:
+    def broadcast(self, population, *, match_on: str | None = None, group_on: str | list | None = None) -> None:
         """Bind a population and create internal behavior based on prompt type."""
         self._population = population
         # Local imports to avoid circular dependency during module import
         from agent_torch.core.llm.behavior import Behavior  # noqa: WPS433
         if isinstance(self._prompt, Template):
+            # Apply grouping/matching at broadcast time
+            if match_on is not None:
+                setattr(self._prompt, "_match_on", match_on)
+            if group_on is not None:
+                setattr(self._prompt, "grouping_logic", group_on)
+            elif match_on is not None and getattr(self._prompt, "grouping_logic", None) in (None, "", []):
+                setattr(self._prompt, "grouping_logic", match_on)
             self._behavior = Behavior(
                 archetype=self._llm_archetypes,
                 region=population,
@@ -66,36 +73,20 @@ class Archetype:
                 region=population,
             )
 
-    def configure(self, *, external_df=None, ground_truth: list | None = None, match_on: str | None = None, reducer: str = "mean", group_on: str | list | None = None):
-        """Configure archetype-level data and ground truth.
+    def configure(self, *, external_df=None, split: int | None = None):
+        """Configure archetype-level external data.
 
-        - external_df: DataFrame of all jobs (923 rows) to drive prompt generation before/after broadcast
-        - ground_truth: list of target values (aligned with external_df rows or to be matched via match_on)
-        - match_on: key to match external rows and/or ground truth (e.g., 'job_title' or 'soc_code')
-        - reducer: how to combine duplicate matches ('mean' default)
-        - group_on: optional grouping key(s); if not provided, will default to match_on when set
+        - external_df: DataFrame to drive prompt generation pre/post broadcast
+        - split: optional row limit for external_df (takes first N rows)
         """
         if isinstance(self._prompt, Template):
-            # attach external_df and matching config to Template
             if external_df is not None:
-                setattr(self._prompt, "_external_df", external_df)
-            if ground_truth is not None:
-                try:
-                    # store a copy to avoid accidental mutation
-                    setattr(self._prompt, "_ground_truth_list", list(ground_truth))
-                    setattr(self._prompt, "_gt_reducer", reducer)
-                except Exception:
-                    pass
-            if match_on is not None:
-                setattr(self._prompt, "_match_on", match_on)
-            # Configure grouping: explicit group_on wins; otherwise default to match_on if grouping not already set
-            try:
-                if group_on is not None:
-                    setattr(self._prompt, "grouping_logic", group_on)
-                elif match_on is not None and getattr(self._prompt, "grouping_logic", None) in (None, "", []):
-                    setattr(self._prompt, "grouping_logic", match_on)
-            except Exception:
-                pass
+                df = external_df
+                if split is not None:
+                    n = int(split)
+                    if hasattr(df, 'head'):
+                        df = df.head(n)
+                setattr(self._prompt, "_external_df", df)
         return self
 
     def sample(self, kwargs: Dict[str, Any] | None = None, print_examples: int = 0) -> torch.Tensor:
@@ -169,7 +160,8 @@ class Archetype:
                 prompt_list = [str(self._prompt)]
 
             # Query the first LLM archetype
-            max_show = max(0, int(print_examples))
+            pe_req = int(print_examples)
+            max_show = len(prompt_list) if pe_req <= 0 else pe_req
             print(f"\n=== Single-shot LLM Call ===")
             print(f"Prompts: {len(prompt_list)} (showing up to {max_show})")
             for i, p in enumerate(prompt_list[:max_show]):
@@ -201,14 +193,11 @@ class Archetype:
             return tensor_out
 
         # Broadcast path: delegate to behavior (optionally print examples)
-        try:
-            pe = int(print_examples)
-        except Exception:
-            pe = 0
-        if pe > 0:
-            if kwargs is None:
-                kwargs = {"device": device, "current_memory_dir": ".agent_torch_memory"}
-            kwargs = {**kwargs, "print_examples": pe}
+        pe = int(print_examples)
+        if kwargs is None:
+            kwargs = {"device": device, "current_memory_dir": ".agent_torch_memory"}
+        # Pass requested print_examples downstream; Behavior will interpret <=0 as "all"
+        kwargs = {**kwargs, "print_examples": pe}
         result = self._behavior.sample(kwargs=kwargs)
         # Flatten (n,1) -> (n,) for user ergonomics
         if result.ndim == 2 and result.shape[1] == 1:
@@ -279,7 +268,7 @@ class LLMArchetype:
         return agent_outputs
 
     def initialize_memory(self, num_agents):
-        # Lazy import to improve startup performance
+        # Optional: try to use richer memory handlers when available; otherwise stick to no-op
         try:
             from langchain.memory import ConversationBufferMemory  # type: ignore
         except Exception:

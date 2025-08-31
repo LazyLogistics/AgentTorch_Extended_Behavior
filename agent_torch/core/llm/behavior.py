@@ -59,6 +59,8 @@ class Behavior:
 
             prompt_list, group_keys, group_indices = self.template.get_grouped_prompts(self.population, kwargs or {})
             max_show = int(kwargs.get("print_examples", 0))
+            if max_show <= 0:
+                max_show = len(prompt_list)
             if max_show > 0:
                 print(f"\n=== Population Broadcast LLM Calls ===")
                 print(f"Number of unique prompts: {len(prompt_list)}")
@@ -95,6 +97,8 @@ class Behavior:
         # Base PromptManager flow
         prompt_list = self.prompt_manager.get_prompt_list(kwargs=kwargs)
         max_show = int(kwargs.get("print_examples", 0))
+        if max_show <= 0:
+            max_show = len(prompt_list)
         if max_show > 0:
             print(f"\n=== Population Broadcast LLM Calls (base) ===")
             print(f"Number of prompts: {len(prompt_list)}")

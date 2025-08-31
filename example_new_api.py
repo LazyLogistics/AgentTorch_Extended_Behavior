@@ -51,24 +51,22 @@ def fn(api_key=None):
 
     all_jobs_df = pd.read_pickle("job_data_clean.pkl")
 
-    # Example: user supplies ground truth as a list (aligned with external_df rows)
-    # For demonstration, we map the CSV to a list once here and pass it in.
+
     gt_csv = pd.read_csv("agent_torch/core/llm/data/ground_truth_willingness_all_soc.csv")
-    # Build a simple lookup by soc_code, then produce a list aligned to all_jobs_df
     soc_to_val = {r['soc_code']: float(r['willingness']) for _, r in gt_csv.iterrows() if 'soc_code' in r and 'willingness' in r}
     ground_truth_list = [soc_to_val.get(str(row.get('soc_code')), 0.0) for _, row in all_jobs_df.iterrows()]
 
-    arch.configure(
-        external_df=all_jobs_df,
-        ground_truth=ground_truth_list,
-        match_on="soc_code",
-    )
+    # For quick tests, you can limit rows via split for pre-broadcast preview
+    arch.configure(external_df=all_jobs_df, split=2)
 
-    arch.sample(print_examples=3)  # runs the prompt for base version
+    arch.sample()  # runs the prompt for base version
 
-    arch.broadcast(population=astoria)
+    # Use full dataset for broadcast to ensure all soc_codes match
+    arch.configure(external_df=all_jobs_df)
 
-    arch.sample(print_examples = 3)  # returns (n_agents,) tensor of decisions
+    arch.broadcast(population=astoria, match_on="soc_code")
+
+    arch.sample()  # returns (n_agents,) tensor of decisions
 
 
     from agent_torch.optim import P3O
@@ -80,11 +78,11 @@ def fn(api_key=None):
 
 
     # Create P3O with archetype; auto-updates from archetype in step()
-    opt = P3O(arch.parameters(), archetype=arch)
+    opt = P3O(arch.parameters(), archetype=arch, ground_truth=ground_truth_list)
     
     for i in range(2):
         # Run population sample; behavior stores group outputs/keys
-        arch.sample()
+        arch.sample(print_examples=1)
         # Apply parameter step (auto-pulls group info from archetype)
         opt.step()
         opt.zero_grad()
