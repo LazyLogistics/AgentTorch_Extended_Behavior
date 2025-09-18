@@ -22,7 +22,7 @@ class Variable:
         self._name: Optional[str] = None
         # Number of presentation options for P3O (0..num_options-1)
         # 0: skip, 1: direct, 2: labeled, 3: contextual, 4: descriptive
-        self.num_options: int = 5
+        self.num_options: int = 2
 
     def __set_name__(self, owner, name: str):
         self._name = name
@@ -42,16 +42,31 @@ class Variable:
     # --- Learnable parameter support (replaces Slot) ---
     def get_parameter(self, instance: Any) -> Optional[nn.Parameter]:
         """Return/create the learnable parameter (logits over options) for this variable on the given instance."""
-        if not self.learnable or self._name is None:
+        if not self.learnable:
             return None
+        
+        # Auto-discover name if not set
+        if self._name is None:
+            for name, var in getattr(instance, '_variables', {}).items():
+                if var is self:
+                    self._name = name
+                    break
+        
+        if self._name is None:
+            return None
+            
         param_attr = f"__var_param__{self._name}"
         param = getattr(instance, param_attr, None)
+        # Debug: Check for parameter sharing
+        if self._name in ['skill_1', 'skill_2', 'skill_3'] and hasattr(instance, '__debug_var_params'):
+            print(f"DEBUG Variable {self._name}: param_attr={param_attr}, param_id={id(param) if param else 'None'}")
+        elif self._name in ['skill_1', 'skill_2', 'skill_3']:
+            instance.__debug_var_params = True
         if not isinstance(param, nn.Parameter):
-            # Initialize logits over presentation options
-            init = torch.full((self.num_options,), 0.5, dtype=torch.float32)
-            # Bias against skip option (index 0)
-            if self.num_options > 0:
-                init[0] = -1.0
+            # Original uses category_index = min(1, num_categories - 1) as default
+            init = torch.zeros(self.num_options, dtype=torch.float32)
+            if self.num_options > 1:
+                init[1] = 1.0  # Bias toward "include" option (index 1)
             param = nn.Parameter(init, requires_grad=True)
             setattr(instance, param_attr, param)
         return param
@@ -98,7 +113,11 @@ class Variable:
             if category == 0:
                 return ""
             if category == 1:
+                # Format skill names with "- Skill: Description" pattern
+                if field_name and field_name != 'soc_code':
+                    return f"- {value}: {value}"
                 return value
+            '''
             if category == 2:
                 return f"{field_name}: {value}"
             if category == 3:
@@ -106,6 +125,7 @@ class Variable:
             if category == 4:
                 return f"The {field_name} is {value}"
             # Fallback
+            '''
             return value
 
         return self.num_options, fmt
@@ -122,6 +142,13 @@ class Variable:
         logits = self.get_parameter(instance)
         if logits is None:
             return 1, torch.tensor(0.0), torch.tensor(0.0)
+        # Check for NaN/inf and reset if needed
+        if torch.isnan(logits).any() or torch.isinf(logits).any():
+            print(f"WARNING: {self._name} has NaN/inf logits, resetting to default")
+            logits.data = torch.tensor([0.0, 1.0], dtype=torch.float32)
+        
+        # Clamp logits to prevent extreme values
+        logits.data = torch.clamp(logits.data, min=-10.0, max=10.0)
         probs = torch.softmax(logits, dim=0)
         dist = torch.distributions.Categorical(probs)
         idx = dist.sample()

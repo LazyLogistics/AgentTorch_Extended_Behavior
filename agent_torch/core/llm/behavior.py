@@ -70,6 +70,20 @@ class Behavior:
                 self.last_slot_entropy_sum = entropy_sum
 
             prompt_list, group_keys, group_indices = self.template.get_grouped_prompts(self.population, kwargs or {})
+            
+            # Apply batch sampling if batch_size is specified
+            original_prompt_count = len(prompt_list)
+            batch_size = kwargs.get("batch_size") if kwargs else None
+            if batch_size and batch_size < len(prompt_list):
+                import random
+                # Randomly sample batch_size groups
+                indices = random.sample(range(len(prompt_list)), batch_size)
+                prompt_list = [prompt_list[i] for i in indices]
+                group_keys = [group_keys[i] for i in indices] 
+                group_indices = [group_indices[i] for i in indices]
+                if verbose:
+                    print(f"Batch sampling: Using {batch_size} groups out of {original_prompt_count} total")
+            
             # Save for downstream (e.g., optimizer diagnostics)
             self.last_prompt_list = prompt_list
             self.last_group_indices = group_indices
@@ -85,21 +99,30 @@ class Behavior:
                 outputs = self.archetype[n_arch](prompt_list, last_k=12)
                 agent_outputs.append(outputs)
             group_values_accum = [0.0 for _ in range(len(prompt_list))]
+            group_structured_accum = [{}  for _ in range(len(prompt_list))]
             for arch_outputs in agent_outputs:
                 for en, output_value in enumerate(arch_outputs):
-                    try:
-                        text_value = output_value["text"] if isinstance(output_value, dict) and "text" in output_value else output_value
-                        value_for_group = float(text_value)
-                        if torch.isnan(torch.tensor(value_for_group, device=device)):
-                            value_for_group = 0.0
-                    except Exception:
-                        value_for_group = 0.0
+                    # Extract structured data from LLM response format
+                    if isinstance(output_value, dict) and "structured" in output_value:
+                        structured_data = output_value["structured"]
+                    else:
+                        structured_data = output_value
+                    # Accumulate structured data for P3O
+                    for k, v in structured_data.items():
+                        if k not in group_structured_accum[en]:
+                            group_structured_accum[en][k] = 0.0
+                        group_structured_accum[en][k] += float(v)
+                    # Sum all values in the structured response for this group
+                    value_for_group = sum(float(v) for v in structured_data.values())
                     group_values_accum[en] += value_for_group
                     idx = torch.tensor(group_indices[en], dtype=torch.long, device=device)
                     sampled_behavior[idx, 0] = sampled_behavior[idx, 0] + value_for_group
             n = len(agent_outputs) if agent_outputs else 1
             sampled_behavior = sampled_behavior / max(n, 1)
             self.last_group_outputs = [v / max(n, 1) for v in group_values_accum]
+            # Store structured outputs for P3O
+            self.last_group_structured = [{k: v / max(n, 1) for k, v in group.items()} 
+                                         for group in group_structured_accum]
             # Always print meta summary regardless of verbosity
             try:
                 mean_val = float(sampled_behavior.mean().item())

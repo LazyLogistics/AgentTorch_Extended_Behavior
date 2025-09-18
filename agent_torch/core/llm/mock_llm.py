@@ -25,7 +25,8 @@ class MockLLM:
         vals = []
         for _ in prompt_list:
             v = self._rng.uniform(self.low, self.high)
-            vals.append({"text": f"{v:.3f}"})
+            # Return structured format expected by archetype
+            vals.append({"structured": {"default": v}})
         return vals
 
     def __call__(self, prompt_inputs: List[Union[str, Dict[str, Any]]]):
